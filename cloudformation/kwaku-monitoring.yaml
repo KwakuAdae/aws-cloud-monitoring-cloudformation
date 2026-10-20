@@ -1,0 +1,313 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Kwaku Digital Services - Cloud Monitoring, Security and Cost Optimisation.
+  An EC2-hosted business website with CloudWatch CPU and status-check alarms, SNS email
+  notifications, an AWS monthly budget, and CloudTrail auditing to an S3 bucket (9 resources).
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: "Notifications and cost" }
+        Parameters: [AlertEmail, MonthlyBudgetUSD, BudgetAlertPercent]
+      - Label: { default: "Business website server" }
+        Parameters: [InstanceType, LatestAmiId]
+      - Label: { default: "Monitoring thresholds" }
+        Parameters: [CpuAlarmThreshold]
+    ParameterLabels:
+      AlertEmail: { default: "Email address that receives alerts" }
+      MonthlyBudgetUSD: { default: "Monthly budget (USD)" }
+      BudgetAlertPercent: { default: "Budget alert at (% of budget)" }
+      CpuAlarmThreshold: { default: "CPU alarm threshold (%)" }
+
+Parameters:
+  AlertEmail:
+    Type: String
+    Description: CloudWatch alarms and budget alerts are emailed here (confirm the SNS subscription email).
+    AllowedPattern: '^[^\s@]+@[^\s@]+\.[^\s@]+$'
+    ConstraintDescription: Must be a valid email address.
+
+  MonthlyBudgetUSD:
+    Type: Number
+    Default: 10
+    MinValue: 1
+    Description: Monthly cost budget in US dollars. This is an alert threshold, not a spending limit.
+
+  BudgetAlertPercent:
+    Type: Number
+    Default: 80
+    MinValue: 1
+    MaxValue: 100
+    Description: Email when ACTUAL monthly cost passes this percentage of the budget.
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t3.micro, t3.small, t2.micro]
+    Description: EC2 instance type for the business website.
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Latest Amazon Linux 2023 AMI (resolved from the public SSM parameter). Leave the default.
+
+  CpuAlarmThreshold:
+    Type: Number
+    Default: 60
+    MinValue: 1
+    MaxValue: 100
+    Description: Alarm when average CPU is above this for two consecutive 5-minute periods.
+
+Resources:
+  # ---------------------------------------------------------------- 1. security group
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Kwaku Digital Services website - HTTP only (no SSH)
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP from the internet
+      Tags:
+        - { Key: Name, Value: kwaku-monitoring-web-sg }
+        - { Key: Project, Value: kwaku-cloud-monitoring }
+
+  # ---------------------------------------------------------------- 2. EC2 business website
+  WebServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      SecurityGroupIds: [!GetAtt WebSecurityGroup.GroupId]
+      # Default VPC: the instance lands in a default subnet that assigns a public IPv4 address
+      Monitoring: false
+      Tags:
+        - { Key: Name, Value: kwaku-digital-services-web }
+        - { Key: Project, Value: kwaku-cloud-monitoring }
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          set -euo pipefail
+          dnf install -y nginx
+          TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+          INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+          AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+          cat > /usr/share/nginx/html/index.html <<EOF
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>Kwaku Digital Services</title>
+          <style>
+            body { font-family: Arial, sans-serif; margin: 0; background: #f4f6f9; color: #222; }
+            header { background: #12345b; color: #fff; text-align: center; padding: 34px 20px; }
+            header h1 { margin: 0 0 6px; }
+            header p { margin: 0; opacity: .85; }
+            main { max-width: 860px; margin: 0 auto; padding: 30px 20px; }
+            .status { background: #e8f6ee; border-left: 5px solid #1a8f4b; padding: 14px 18px; border-radius: 8px; }
+            .grid { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 24px; }
+            .card { flex: 1 1 240px; background: #fff; border-radius: 12px; padding: 18px; box-shadow: 0 4px 14px rgba(18,52,91,.08); }
+            .card h3 { margin-top: 0; color: #12345b; }
+            footer { text-align: center; color: #6b7280; font-size: 13px; padding: 20px; }
+            code { background: #eef1f5; padding: 2px 6px; border-radius: 4px; }
+          </style>
+          </head>
+          <body>
+          <header>
+            <h1>Kwaku Digital Services</h1>
+            <p>Business website monitored by Amazon CloudWatch</p>
+          </header>
+          <main>
+            <div class="status">&#9989; <strong>AWS Cloud Monitoring Demo</strong>: this server is watched 24/7.</div>
+            <div class="grid">
+              <div class="card"><h3>Performance</h3>CloudWatch alarms on CPU above the threshold and on failed EC2 status checks.</div>
+              <div class="card"><h3>Alerts</h3>Amazon SNS emails the IT administrator as soon as an alarm fires.</div>
+              <div class="card"><h3>Cost</h3>An AWS monthly budget emails before spending gets out of hand.</div>
+              <div class="card"><h3>Security</h3>CloudTrail records AWS account activity to an encrypted S3 bucket.</div>
+            </div>
+            <p style="margin-top:26px">Served by <code>$INSTANCE_ID</code> in <code>$AZ</code>. Deployed with AWS CloudFormation.</p>
+          </main>
+          <footer>Demonstration website (HTTP only). Do not enter personal information, passwords or payment details.</footer>
+          </body>
+          </html>
+          EOF
+          systemctl enable --now nginx
+
+  # ---------------------------------------------------------------- 3. SNS topic + email
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: kwaku-monitoring-alerts
+      DisplayName: Kwaku Monitoring
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlertEmail
+      Tags:
+        - { Key: Project, Value: kwaku-cloud-monitoring }
+
+  # ---------------------------------------------------------------- 4. CPU alarm
+  CpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub kwaku-high-cpu-${WebServer}
+      AlarmDescription: !Sub Average CPU above ${CpuAlarmThreshold}% for two consecutive 5-minute periods on the Kwaku website server
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - { Name: InstanceId, Value: !Ref WebServer }
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: !Ref CpuAlarmThreshold
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: missing
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  # ---------------------------------------------------------------- 5. status check alarm
+  StatusCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub kwaku-status-check-failed-${WebServer}
+      AlarmDescription: The Kwaku website server failed its EC2 instance or system status checks for 2 minutes
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed
+      Dimensions:
+        - { Name: InstanceId, Value: !Ref WebServer }
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: missing
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  # ---------------------------------------------------------------- 6. monthly budget
+  MonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub kwaku-monthly-budget-${AWS::Region}
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetUSD
+          Unit: USD
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: !Ref BudgetAlertPercent
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - { SubscriptionType: EMAIL, Address: !Ref AlertEmail }
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - { SubscriptionType: EMAIL, Address: !Ref AlertEmail }
+
+  # ---------------------------------------------------------------- 7. S3 audit bucket
+  AuditBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub kwaku-audit-logs-${AWS::AccountId}-${AWS::Region}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-audit-logs-after-90-days
+            Status: Enabled
+            ExpirationInDays: 90
+      Tags:
+        - { Key: Project, Value: kwaku-cloud-monitoring }
+
+  # ---------------------------------------------------------------- 8. bucket policy for CloudTrail
+  AuditBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AuditBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal: { Service: cloudtrail.amazonaws.com }
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt AuditBucket.Arn
+            Condition:
+              StringEquals:
+                aws:SourceArn: !Sub arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/kwaku-monitoring-trail
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal: { Service: cloudtrail.amazonaws.com }
+            Action: s3:PutObject
+            Resource: !Sub ${AuditBucket.Arn}/AWSLogs/${AWS::AccountId}/*
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+                aws:SourceArn: !Sub arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/kwaku-monitoring-trail
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt AuditBucket.Arn
+              - !Sub ${AuditBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  # ---------------------------------------------------------------- 9. CloudTrail trail
+  AuditTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn: AuditBucketPolicy
+    Properties:
+      TrailName: kwaku-monitoring-trail
+      S3BucketName: !Ref AuditBucket
+      IsLogging: true
+      IsMultiRegionTrail: false
+      IncludeGlobalServiceEvents: true
+      EnableLogFileValidation: true
+      Tags:
+        - { Key: Project, Value: kwaku-cloud-monitoring }
+
+Outputs:
+  WebsiteURL:
+    Description: The business website (HTTP only)
+    Value: !Sub http://${WebServer.PublicDnsName}
+  InstanceId:
+    Description: EC2 instance hosting the website
+    Value: !Ref WebServer
+  SNSTopicArn:
+    Description: SNS topic that emails alerts
+    Value: !Ref AlertTopic
+  CpuAlarmName:
+    Description: CloudWatch CPU utilisation alarm
+    Value: !Ref CpuAlarm
+  StatusCheckAlarmName:
+    Description: CloudWatch status check alarm
+    Value: !Ref StatusCheckAlarm
+  BudgetName:
+    Description: AWS monthly cost budget
+    Value: !Sub kwaku-monthly-budget-${AWS::Region}
+  AuditBucketName:
+    Description: S3 bucket receiving CloudTrail logs (empty it before deleting the stack)
+    Value: !Ref AuditBucket
+  TrailName:
+    Description: CloudTrail trail recording management events
+    Value: !Ref AuditTrail

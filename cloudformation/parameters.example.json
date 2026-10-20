@@ -1,0 +1,7 @@
+[
+  { "ParameterKey": "AlertEmail",         "ParameterValue": "you@example.com" },
+  { "ParameterKey": "MonthlyBudgetUSD",   "ParameterValue": "10" },
+  { "ParameterKey": "BudgetAlertPercent", "ParameterValue": "80" },
+  { "ParameterKey": "InstanceType",       "ParameterValue": "t3.micro" },
+  { "ParameterKey": "CpuAlarmThreshold",  "ParameterValue": "60" }
+]
